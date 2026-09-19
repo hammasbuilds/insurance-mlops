@@ -1,4 +1,4 @@
-<h1 align="center">insurance-mlops</h1>
+<h1 align="center">insurance-mlops (Python · point-in-time feature store · skew detection)</h1>
 <p align="center"><i>The four things that actually break a deployed insurance model, solved in code rather than in a policy document</i></p>
 
 <p align="center">
