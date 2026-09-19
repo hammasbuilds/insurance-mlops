@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/hammas159/insurance-mlops/actions/workflows/ci.yml"><img src="https://github.com/hammas159/insurance-mlops/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://github.com/hammasbuilds/insurance-mlops/actions/workflows/ci.yml"><img src="https://github.com/hammasbuilds/insurance-mlops/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="python">
   <img src="https://img.shields.io/badge/core%20deps-zero-success" alt="deps">
   <img src="https://img.shields.io/badge/stack-pandas%20%C2%B7%20Streamlit-orange" alt="stack">
@@ -184,9 +184,9 @@ not — so leakage is *asserted*, not sampled for.
 
 Deliberately does **not** re-implement what the neighbouring repos already do:
 
-- Serving, canary and rollback → [`model-serving-platform`](https://github.com/hammas159/model-serving-platform)
-- Drift monitoring → [`llm-observability-platform`](https://github.com/hammas159/llm-observability-platform)
-- Scorecards, calibration, fairness metrics → [`credit-risk-engine`](https://github.com/hammas159/credit-risk-engine)
+- Serving, canary and rollback → [`model-serving-platform`](https://github.com/hammasbuilds/model-serving-platform)
+- Drift monitoring → [`llm-observability-platform`](https://github.com/hammasbuilds/llm-observability-platform)
+- Scorecards, calibration, fairness metrics → [`credit-risk-engine`](https://github.com/hammasbuilds/credit-risk-engine)
 
 This one owns the parts of the lifecycle those do not: **what the model was trained on,
 whether it is still the same pipeline, and whether it is allowed to ship.**
@@ -217,7 +217,7 @@ MIT
 ## Run it yourself
 
 ```bash
-git clone https://github.com/hammas159/insurance-mlops
+git clone https://github.com/hammasbuilds/insurance-mlops
 cd insurance-mlops
 
 pip install -e .         # zero dependencies to resolve
