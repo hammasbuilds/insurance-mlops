@@ -166,7 +166,7 @@ than anonymous.
 
 ## Tests
 
-**48 tests (42 core + 6 for the optional Streamlit demo). No dependencies, no data, no cloud.**
+**44 tests. No dependencies, no data, no cloud.**
 
 Point-in-time correctness is exact — a value either was knowable at a moment or it was
 not — so leakage is *asserted*, not sampled for.
@@ -221,7 +221,7 @@ git clone https://github.com/hammasbuilds/insurance-mlops
 cd insurance-mlops
 
 pip install -e .         # zero dependencies to resolve
-pytest -q                # 48 tests, under a second
+pytest -q                # 44 tests, under a second
 ```
 
 ```python

@@ -26,3 +26,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The package lives in src/, so `pytest` from a fresh clone cannot import it
+# without this. CI installs the package first, which hid the problem: CI was
+# green while every clone failed at collection with ModuleNotFoundError.
+pythonpath = ["src"]
