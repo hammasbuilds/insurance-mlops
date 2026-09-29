@@ -7,6 +7,12 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
 
+# Both, deliberately. `uv sync` reads the dependency group; `pip install -e ".[dev]"`
+# reads the extra and only warns if it is missing, so the README's own quickstart left
+# pytest uninstalled and told the user to run it.
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "ruff>=0.8"]
+
 [dependency-groups]
 dev = ["pytest>=8.3", "ruff>=0.8"]
 

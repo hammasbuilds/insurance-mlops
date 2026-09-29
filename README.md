@@ -14,7 +14,6 @@
   <a href="https://github.com/hammasbuilds/insurance-mlops/actions/workflows/ci.yml"><img src="https://github.com/hammasbuilds/insurance-mlops/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="python">
   <img src="https://img.shields.io/badge/core%20deps-zero-success" alt="deps">
-  <img src="https://img.shields.io/badge/stack-pandas%20%C2%B7%20Streamlit-orange" alt="stack">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license"></a>
 </p>
 
@@ -166,7 +165,7 @@ than anonymous.
 
 ## Tests
 
-**44 tests. No dependencies, no data, no cloud.**
+**111 tests. No dependencies, no data, no cloud.**
 
 Point-in-time correctness is exact — a value either was knowable at a moment or it was
 not — so leakage is *asserted*, not sampled for.
@@ -179,6 +178,7 @@ not — so leakage is *asserted*, not sampled for.
 | Model cards | completeness, every required field, `UNASSIGNED` owner, metrics rendered |
 | Consent | purpose limitation, no-record default, withdrawal, non-retroactivity, pre-grant queries |
 | Release gate | approval, each failure mode, missing metric, all failures listed, named gate |
+| CLI | JSONL/JSON/CSV parsed equal, missing-cell forms, exit codes, `--json` output |
 
 ## Where this sits
 
@@ -206,7 +206,7 @@ whether it is still the same pipeline, and whether it is allowed to ship.**
 
 ## Keywords
 
-MLOps &middot; insurance &middot; point-in-time correctness &middot; feature store &middot; data leakage &middot; training serving skew &middot; model cards &middot; model governance &middot; responsible AI &middot; GDPR &middot; consent management &middot; purpose limitation &middot; release gate &middot; actuarial modelling &middot; freMTPL2 &middot; regulated ML
+MLOps &middot; insurance &middot; point-in-time correctness &middot; feature store &middot; data leakage &middot; training serving skew &middot; model cards &middot; model governance &middot; responsible AI &middot; GDPR &middot; consent management &middot; purpose limitation &middot; release gate &middot; regulated ML
 
 ## License
 
@@ -220,24 +220,54 @@ MIT
 git clone https://github.com/hammasbuilds/insurance-mlops
 cd insurance-mlops
 
-pip install -e .         # zero dependencies to resolve
-pytest -q                # 44 tests, under a second
+pip install -e ".[dev]"  # zero runtime dependencies; pytest for development
+pytest -q                # 111 tests, under two seconds
 ```
+
+Every call below is real and runs as shown — paste the whole block into a `python` shell:
 
 ```python
-from insurance import FeatureStore, detect_skew, ModelCard, ReleaseGate, ConsentLedger
+from insurance import ConsentLedger, FeatureStore, ModelCard, ReleaseGate, detect_skew
 
+# 1. Point-in-time correctness: a value written later must not leak into an earlier read.
 store = FeatureStore()
-store.write("cust-1", "prior_claims", 1, event_time=t(1))
-store.write("cust-1", "prior_claims", 4, event_time=t(60))
+store.write("cust-1", "prior_claims", 1, event_time=1)
+store.write("cust-1", "prior_claims", 4, event_time=60)
+store.get_as_of("cust-1", "prior_claims", 30).value          # 1, not 4
 
-store.get_as_of("cust-1", "prior_claims", t(30)).value    # 1, not 4
-rows, labels = store.build_training_set(decisions, ["prior_claims"])
+rows, labels = store.build_training_set([("cust-1", 30, 0)], ["prior_claims"])
+rows[0]["prior_claims"]                                        # 1 - what was known at t=30
 
-detect_skew(training_rows, serving_rows)["safe_to_serve"]
+# 2. Skew: same feature, disagreeing units between the two pipelines.
+training_rows = [{"vehicle_age_years": 5}] * 20
+serving_rows = [{"vehicle_age_years": 60}] * 20               # looks like months
+detect_skew(training_rows, serving_rows)["safe_to_serve"]     # False
 
-ReleaseGate().evaluate(card=card, metrics=metrics, fairness=fairness, skew=skew)
+# 3. A model card with a gap in it, and the release gate that reads it.
+card = ModelCard(
+    name="claims-triage", version="1.0", intended_use="triage new claims",
+    out_of_scope=["pricing"], training_data="2020-2024 claims", owner="",
+    limitations=["not validated outside urban regions"], reviewed_by="a.reviewer",
+)
+ReleaseGate().evaluate(
+    card=card,
+    metrics={"gini": 0.4, "brier": 0.2},
+    fairness={"worst_disparate_impact": 0.85},
+    skew={"safe_to_serve": True},
+)["approved"]                                                   # False - card.owner is blank
 ```
+
+### On files, for CI and on-call
+
+```bash
+python -m insurance skew training.jsonl serving.jsonl [--json]
+python -m insurance gate --card card.json --metrics metrics.json \
+    --fairness fairness.json --skew skew.json [--json]
+```
+
+Exit code 0 for safe/approved, 1 for refused, 2 for bad input — wire either straight
+into a CI gate. Rows are JSON Lines, a JSON array, or CSV; a CSV cell and the same value
+in a JSONL export compare equal, including blank/NA/NaN/null as missing.
 
 ### Input / Output
 
