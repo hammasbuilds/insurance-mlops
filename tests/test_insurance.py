@@ -313,4 +313,4 @@ class TestReleaseGate:
 
     def test_the_gate_is_named_for_the_audit_trail(self):
         result = ReleaseGate().evaluate(card=complete_card(), metrics={"gini": 0.45})
-        assert result["gate"] == "insurance-mlops/release/v1"
+        assert result["gate"] == "insurance-mlops/release/v2"
