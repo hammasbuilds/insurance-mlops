@@ -6,8 +6,7 @@
   <a href="#2-skew-is-not-drift">Skew vs drift</a> &middot;
   <a href="#3-model-cards-where-the-useful-half-is-out-of-scope">Model cards</a> &middot;
   <a href="#4-consent-and-purpose-limitation-enforced-at-read-time">Consent</a> &middot;
-  <a href="#the-release-gate-refuses">The release gate</a> &middot;
-  <a href="#problems-hit-while-building-this">Problems hit</a>
+  <a href="#the-release-gate-refuses">The release gate</a> 
 </p>
 
 <p align="center">
@@ -282,24 +281,3 @@ anyone can act on. v4.4.0 is the interesting one: the model is unchanged and its
 are identical to the approved v4.2.0. What failed is that `vehicle_age` arrives in months
 at serving time and was trained in years — a fault no evaluation metric can see, because
 the evaluation set has the training units.
-
-## Problems hit while building this
-
-**Modelling one timestamp per feature was not enough.** The first version recorded only
-when a fact became *true*. But a claim filed on Monday and entered into the system on
-Wednesday was not available to a model running on Tuesday — so a training set built from
-event time still leaks, just less obviously. *Fixed* by carrying both `event_time` and
-`available_at`, with the store refusing to record a value as knowable before it happened.
-
-**Purging left a trapdoor.** After deleting values older than a retention cutoff, an
-as-of query for an early date fell back to... nothing, correctly — but only because the
-query is availability-ordered. It would have been easy to write a version that returned
-the next surviving value instead, silently answering with data from the wrong period
-*after* the correct data was legally deleted. There is now a test asserting a purged
-value stays purged.
-
-**Withdrawal of consent was almost made retroactive.** The instinct is that withdrawing
-consent invalidates past use. It does not: a model trained lawfully in March was lawful
-in March, and retroactive invalidation is a *different* obligation from deletion.
-Conflating them makes both harder to reason about, so `permits(purpose, at=...)` answers
-for the moment asked, and that asymmetry is a test.
