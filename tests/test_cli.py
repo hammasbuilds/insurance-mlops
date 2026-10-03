@@ -138,3 +138,20 @@ def test_python_dash_m_runs(batches):
     )
     assert proc.returncode == 1, proc.stderr
     assert "vehicle_age" in proc.stdout
+
+
+def test_skew_noisy_years_to_months_exits_one(tmp_path, capsys):
+    import random
+
+    rng = random.Random(1)
+    train = write_jsonl(tmp_path / "t.jsonl", [{"veh": rng.randint(0, 15)} for _ in range(300)])
+    serve = write_jsonl(
+        tmp_path / "s.jsonl", [{"veh": rng.randint(0, 15) * 12} for _ in range(300)]
+    )
+    assert main(["skew", str(train), str(serve)]) == 1
+    assert "years vs months" in capsys.readouterr().out
+
+
+def test_console_script_is_declared():
+    text = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'insurance-mlops = "insurance.cli:main"' in text

@@ -10,6 +10,9 @@ dependencies = []
 # Both, deliberately. `uv sync` reads the dependency group; `pip install -e ".[dev]"`
 # reads the extra and only warns if it is missing, so the README's own quickstart left
 # pytest uninstalled and told the user to run it.
+[project.scripts]
+insurance-mlops = "insurance.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "ruff>=0.8"]
 

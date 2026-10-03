@@ -164,7 +164,7 @@ than anonymous.
 
 ## Tests
 
-**111 tests. No dependencies, no data, no cloud.**
+**118 tests. No dependencies, no data, no cloud.**
 
 Point-in-time correctness is exact — a value either was knowable at a moment or it was
 not — so leakage is *asserted*, not sampled for.
@@ -173,7 +173,7 @@ not — so leakage is *asserted*, not sampled for.
 |---|---|
 | Point-in-time | later values invisible, latest-knowable wins, reporting lag, impossible availability refused, out-of-order backfills, decision-time training sets, staleness |
 | Retention | purge before cutoff, series removal, purged values stay purged |
-| Skew | unit mismatch named, missing/extra feature, missingness gap, type change, out-of-range, clean pipelines, blocking verdict |
+| Skew | unit mismatch named (incl. noisy independent years-vs-months samples), unchanged noisy features stay safe, missing/extra feature, missingness gap, type change, out-of-range, clean pipelines, blocking verdict |
 | Model cards | completeness, every required field, `UNASSIGNED` owner, metrics rendered |
 | Consent | purpose limitation, no-record default, withdrawal, non-retroactivity, pre-grant queries |
 | Release gate | approval, each failure mode, missing metric, all failures listed, named gate |
@@ -220,7 +220,7 @@ git clone https://github.com/hammasbuilds/insurance-mlops
 cd insurance-mlops
 
 pip install -e ".[dev]"  # zero runtime dependencies; pytest for development
-pytest -q                # 111 tests, under two seconds
+pytest -q                # 118 tests, under two seconds
 ```
 
 Every call below is real and runs as shown — paste the whole block into a `python` shell:
@@ -259,8 +259,8 @@ ReleaseGate().evaluate(
 ### On files, for CI and on-call
 
 ```bash
-python -m insurance skew training.jsonl serving.jsonl [--json]
-python -m insurance gate --card card.json --metrics metrics.json \
+insurance-mlops skew training.jsonl serving.jsonl [--json]   # or: python -m insurance ...
+insurance-mlops gate --card card.json --metrics metrics.json \
     --fairness fairness.json --skew skew.json [--json]
 ```
 
@@ -270,11 +270,34 @@ in a JSONL export compare equal, including blank/NA/NaN/null as missing.
 
 ### Input / Output
 
-![input](docs/images/input.png)
+```console
+$ python demo.py
+INPUT
+   v4.2.0  documented, reviewed, calibrated
+   v4.3.0  no owner recorded
+   v4.4.0  units changed between train and serve
+   v4.5.0  barely separates, and unevenly
+   v4.6.0  eval job crashed and wrote NaN
 
-`python demo.py`
+OUTPUT
+   v4.2.0  documented, reviewed, calibrated        APPROVED
+   v4.3.0  no owner recorded                       REFUSED
+      - model card incomplete: owner
+   v4.4.0  units changed between train and serve   REFUSED
+      - training/serving skew in vehicle_age (unit): serving divided by 12 matches training - looks like years vs months
+      - training/serving skew in vehicle_age (range): 91.7% of serving values fall outside the training range 1 to 12
+   v4.5.0  barely separates, and unevenly          REFUSED
+      - gini 0.080 below minimum 0.3
+      - brier 0.310 above maximum 0.25
+      - disparate impact 0.610 below 0.80
+   v4.6.0  eval job crashed and wrote NaN          REFUSED
+      - gini is NaN - the evaluation did not produce a value
+      - brier is NaN - the evaluation did not produce a value
+      - worst_disparate_impact not supplied
 
-![output](docs/images/output.png)
+   The gate refuses. It does not warn and proceed, because a warning
+   on a release pipeline is a release.
+```
 
 Each refusal names the specific condition that failed, which is the only form of refusal
 anyone can act on. v4.4.0 is the interesting one: the model is unchanged and its metrics
