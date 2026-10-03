@@ -21,6 +21,7 @@ What counts as the *same* value matters as much as what counts as different:
 
 from __future__ import annotations
 
+import bisect
 import math
 import numbers
 import statistics
@@ -35,6 +36,11 @@ UNSEEN_CRITICAL_SHARE = 0.50
 MISSINGNESS_GAP = 0.10
 NON_FINITE_GAP = 0.01
 RANGE_SHARE = 0.05
+# Most of serving outside anything training ever saw: the model is not being used
+# on the population it was fitted on, whatever the cause.
+RANGE_CRITICAL_SHARE = 0.50
+# Rounding allowance for the rescaled comparison (whole years vs exact months).
+UNIT_KS_FLOOR = 0.10
 
 _UNIT_FACTORS = (
     (12, "years vs months"),
@@ -103,22 +109,52 @@ def _preview(items, limit: int = 4) -> str:
     return shown + (f", ... (+{len(items) - limit} more)" if len(items) > limit else "")
 
 
-def _scale_ratios(train: list[float], serve: list[float]) -> list[float]:
-    """Ratios that move by exactly the unit factor when every value is rescaled.
+def _ks(a: list[float], b: list[float]) -> float:
+    """Two-sample Kolmogorov-Smirnov statistic: the largest gap between the two CDFs."""
+    a, b = sorted(a), sorted(b)
+    gap = 0.0
+    for x in set(a) | set(b):
+        gap = max(gap, abs(bisect.bisect_right(a, x) / len(a) - bisect.bisect_right(b, x) / len(b)))
+    return gap
 
-    The plain mean fails for a zero-centred feature: a +/-1 score rescaled to +/-12
-    has a mean near 0 on both sides, and the ratio of two near-zero means is noise
-    that can land on 12 or 100 by chance. The mean and the median of absolute values
-    are both scale summaries (equal to the mean for all-positive data) and rescale
-    exactly with the unit.
+
+def _ks_critical(n: int, m: int) -> float:
+    """KS critical value at alpha = 0.01: gaps below this are sampling noise."""
+    return 1.63 * math.sqrt((n + m) / (n * m))
+
+
+def _unit_change(train: list[float], serve: list[float]) -> tuple[float, str] | None:
+    """The conversion factor that turns serving back into training, if one does.
+
+    A single mean ratio is too brittle: two independent 300-row samples of a 0-15
+    years feature gave a months/years mean ratio of 13.2, far outside any tight
+    tolerance around 12. So compare whole distributions instead. A unit change is
+    declared when serving differs from training by more than sampling noise (KS
+    above its alpha=0.01 critical value) and dividing serving by a known factor
+    makes the two indistinguishable again (KS within noise, with a small floor for
+    rounding, e.g. whole years vs exact months) and at most half the raw gap.
+    The tolerance therefore scales with the batch sizes rather than being a fixed 5%.
     """
-    ratios = []
-    for summary in (statistics.fmean, statistics.median):
-        a = summary([abs(x) for x in train])
-        b = summary([abs(x) for x in serve])
-        if a and b:
-            ratios.append(b / a)
-    return ratios
+    crit = _ks_critical(len(train), len(serve))
+    raw = _ks(train, serve)
+    # Capped at 0.5 so tiny batches (where the critical value exceeds 1) can still
+    # flag disjoint distributions.
+    if raw <= min(crit, 0.5):
+        return None
+    # An integer-valued training feature is usually a truncated count (age in whole
+    # years), so serving is also compared after truncating to whole units.
+    whole = all(v.is_integer() for v in train)
+    candidates = []
+    for f, u in _UNIT_FACTORS:
+        rescaled = [v / f for v in serve]
+        gap = _ks(train, rescaled)
+        if whole:
+            gap = min(gap, _ks(train, [float(math.floor(v)) for v in rescaled]))
+        candidates.append((gap, f, u))
+    gap, factor, label = min(candidates)
+    if gap <= max(crit, UNIT_KS_FLOOR) and gap <= raw / 2:
+        return factor, label
+    return None
 
 
 def _compare_categories(name: str, train: list, serve: list) -> list[SkewFinding]:
@@ -204,18 +240,17 @@ def compare_feature(
     # A unit change rescales every value by a constant factor. Worth naming
     # separately because it is the single most common skew and the easiest to fix
     # once someone says the word "units".
-    for ratio in _scale_ratios(train_values, serve_values):
-        match = next((u for f, u in _UNIT_FACTORS if math.isclose(ratio, f, rel_tol=0.05)), None)
-        if match:
-            findings.append(
-                SkewFinding(
-                    name,
-                    "unit",
-                    f"serving is {ratio:.3g}x training - looks like {match}",
-                    "critical",
-                )
+    unit = _unit_change(train_values, serve_values)
+    if unit:
+        factor, label = unit
+        findings.append(
+            SkewFinding(
+                name,
+                "unit",
+                f"serving divided by {factor:.4g} matches training - looks like {label}",
+                "critical",
             )
-            break
+        )
 
     train_mean = statistics.fmean(train_values)
     serve_mean = statistics.fmean(serve_values)
@@ -240,7 +275,9 @@ def compare_feature(
                 "range",
                 f"{out_of_range / len(serve_values):.1%} of serving values fall outside the "
                 f"training range {low:.4g} to {high:.4g}",
-                "warning",
+                "critical"
+                if out_of_range / len(serve_values) > RANGE_CRITICAL_SHARE
+                else "warning",
             )
         )
 

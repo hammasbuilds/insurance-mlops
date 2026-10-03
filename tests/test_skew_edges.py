@@ -130,3 +130,51 @@ class TestCategoricalSkew:
     def test_the_same_vocabulary_is_clean(self):
         rows = [{"fuel": f} for f in ["petrol", "diesel", "ev"] * 20]
         assert detect_skew(rows, list(reversed(rows)))["findings"] == []
+
+
+class TestNoisyUnitChange:
+    """Independent samples, not the same rows rescaled: the case on-call actually sees."""
+
+    def _batches(self, seed, scale, months_noise=False):
+        import random
+
+        rng = random.Random(seed)
+        training = [{"veh": rng.randint(0, 15)} for _ in range(300)]
+        serving = []
+        for _ in range(300):
+            v = rng.randint(0, 15) * scale
+            if months_noise:
+                v += rng.randint(0, 11)
+            serving.append({"veh": v})
+        return training, serving
+
+    def test_years_to_months_on_independent_samples_is_critical(self):
+        for seed in range(20):
+            result = detect_skew(*self._batches(seed, 12))
+            assert not result["safe_to_serve"], seed
+            assert any(f["kind"] == "unit" for f in result["findings"]), seed
+
+    def test_exact_months_from_dates_is_still_named_a_unit_change(self):
+        for seed in range(20):
+            result = detect_skew(*self._batches(seed, 12, months_noise=True))
+            assert any(f["kind"] == "unit" for f in result["findings"]), seed
+
+    def test_unchanged_noisy_feature_stays_safe(self):
+        for seed in range(50):
+            result = detect_skew(*self._batches(seed, 1))
+            assert result["safe_to_serve"], (seed, result["findings"])
+
+    def test_unchanged_continuous_feature_stays_safe(self):
+        import random
+
+        for seed in range(30):
+            rng = random.Random(seed)
+            training = [{"p": rng.lognormvariate(5, 1)} for _ in range(400)]
+            serving = [{"p": rng.lognormvariate(5, 1)} for _ in range(400)]
+            assert detect_skew(training, serving)["safe_to_serve"], seed
+
+    def test_mostly_out_of_range_is_critical(self):
+        training = [{"x": float(i % 10)} for i in range(100)]
+        serving = [{"x": 50.0 + i % 7} for i in range(100)]
+        result = detect_skew(training, serving)
+        assert any(f["kind"] == "range" and f["severity"] == "critical" for f in result["findings"])
