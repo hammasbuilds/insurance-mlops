@@ -1,229 +1,96 @@
-<h1 align="center">insurance-mlops (Python · point-in-time feature store · skew detection)</h1>
-<p align="center"><i>The four things that actually break a deployed insurance model, solved in code rather than in a policy document</i></p>
+# insurance-mlops
 
-<p align="center">
-  <a href="#1-point-in-time-correctness">Point-in-time</a> &middot;
-  <a href="#2-skew-is-not-drift">Skew vs drift</a> &middot;
-  <a href="#3-model-cards-where-the-useful-half-is-out-of-scope">Model cards</a> &middot;
-  <a href="#4-consent-and-purpose-limitation-enforced-at-read-time">Consent</a> &middot;
-  <a href="#the-release-gate-refuses">The release gate</a> 
-</p>
+The checks that decide whether a deployed insurance model was trained on valid data and is allowed to ship. We
+built it for ML engineers and model-risk teams at insurers: a point-in-time feature store that cannot leak future
+values into training, a training/serving skew detector, model cards that must be complete, a consent ledger that
+enforces purpose limitation at read time, and a release gate that refuses rather than warns. Pure Python, zero
+dependencies.
 
-<p align="center">
-  <a href="https://github.com/hammasbuilds/insurance-mlops/actions/workflows/ci.yml"><img src="https://github.com/hammasbuilds/insurance-mlops/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="python">
-  <img src="https://img.shields.io/badge/core%20deps-zero-success" alt="deps">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license"></a>
-</p>
+## What it does
 
----
+- **Point-in-time feature store.** Every value carries when it became true and when it became knowable (reporting
+  lag). `get_as_of(entity, feature, t)` returns what was known at `t`, so a claim count updated after the decision
+  never reaches the training set. The store refuses a value recorded as knowable before it happened, and reports
+  staleness.
+- **Training/serving skew detection.** Compares the two pipelines directly and names missing or extra features,
+  type changes, unit mismatches (for example years vs months, by name and by a 12x ratio), missingness gaps and
+  values outside the training range. `safe_to_serve` is a blocking verdict.
+- **Model cards** with required fields (`intended_use`, `out_of_scope`, `training_data`, `owner`, `limitations`).
+  An incomplete card blocks release; a missing owner renders as `UNASSIGNED`.
+- **Consent and purpose limitation at read time.** `ledger.permitted(cohort, "marketing")` returns only subjects
+  who consented to that purpose. No record means no consent; withdrawal is not retroactive for a past query;
+  purged values stay purged.
+- **A release gate that refuses.** Reads the card, metrics (Gini, Brier), fairness (disparate impact) and skew
+  verdict, lists every failure, treats a missing or NaN metric as a failure, and names itself in its output.
+- **A CLI for CI and on-call**: `insurance-mlops skew` and `insurance-mlops gate`, exit 0 safe / 1 refused / 2 bad
+  input, reading JSON Lines, JSON arrays or CSV.
 
-## 1. Point-in-time correctness
+Serving and rollback live in [model-serving-platform](https://github.com/hammasbuilds/model-serving-platform), drift
+monitoring in [llm-observability-platform](https://github.com/hammasbuilds/llm-observability-platform) and
+scorecards in [credit-risk-engine](https://github.com/hammasbuilds/credit-risk-engine).
 
-```mermaid
-flowchart TD
-    F["feature request"] --> P["point-in-time read<br/>as of the decision date"]
-    P --> CN{"consent and purpose<br/>allow this use?"}
-    CN -->|"no"| R1["refuse at read time"]
-    CN -->|"yes"| T["train"]
-    T --> SK["training vs serving skew check"]
-    SK --> MC["model card,<br/>including OUT OF SCOPE"]
-    MC --> G{"release gate"}
-    G -->|"any check fails"| R2["refuse"]
-    G -->|"all pass"| D["deploy"]
+## Sample input / output
 
-    style R1 fill:#dc2626,color:#fff
-    style R2 fill:#dc2626,color:#fff
-    style D fill:#16a34a,color:#fff
+`python demo.py` sends five release candidates of one claims model through the gate:
+
+```console
+$ python demo.py
+INPUT
+   v4.2.0  documented, reviewed, calibrated
+   v4.3.0  no owner recorded
+   v4.4.0  units changed between train and serve
+   v4.5.0  barely separates, and unevenly
+   v4.6.0  eval job crashed and wrote NaN
+
+OUTPUT
+   v4.2.0  documented, reviewed, calibrated        APPROVED
+   v4.3.0  no owner recorded                       REFUSED
+      - model card incomplete: owner
+   v4.4.0  units changed between train and serve   REFUSED
+      - training/serving skew in vehicle_age (unit): serving divided by 12 matches training - looks like years vs months
+      - training/serving skew in vehicle_age (range): 91.7% of serving values fall outside the training range 1 to 12
+   v4.5.0  barely separates, and unevenly          REFUSED
+      - gini 0.080 below minimum 0.3
+      - brier 0.310 above maximum 0.25
+      - disparate impact 0.610 below 0.80
+   v4.6.0  eval job crashed and wrote NaN          REFUSED
+      - gini is NaN - the evaluation did not produce a value
+      - brier is NaN - the evaluation did not produce a value
+      - worst_disparate_impact not supplied
+
+   The gate refuses. It does not warn and proceed, because a warning
+   on a release pipeline is a release.
 ```
 
-Consent is enforced **at read time**, not reviewed afterwards - which is the difference
-between a control and a policy document.
+v4.4.0 has the same model and the same metrics as the approved v4.2.0. What failed is that `vehicle_age` arrives in
+months at serving time and was trained in years, a fault no evaluation metric can see.
 
+## Results
 
-The most expensive bug in production ML, and the one that never appears in a notebook:
-
-```
-claim filed                      2026-03-01
-fraud confirmed                  2026-05-14
-prior_claims_count (today)       4
-```
-
-Training on today's `prior_claims_count` teaches the model a number that **did not
-exist** when the decision had to be made. Offline accuracy is excellent. Online
-accuracy collapses, and everyone blames drift.
-
-A point-in-time join asks a different question — not *"what is this customer's claim
-count?"* but *"what was it, as far as anyone knew, at 09:14 on the first of March?"*
-
-```python
-store.write("cust-1", "prior_claims", 1, event_time=t(1))
-store.write("cust-1", "prior_claims", 4, event_time=t(60))
-
-store.get_as_of("cust-1", "prior_claims", t(30)).value   # 1, not 4
-```
-
-### Reporting lag is modelled separately
-
-Every value carries both when it **became true** and when it **became knowable**. A
-claim filed Monday and entered Wednesday was not available to a model running Tuesday —
-and pretending otherwise is the same bug wearing a hat.
-
-The store refuses to record a value as knowable before it happened. That is a test.
-
-**Staleness is reported too.** A point-in-time-correct feature can still be useless: a
-risk score last refreshed eight months ago is technically legitimate and practically
-fiction.
-
-## 2. Skew is not drift
-
-The distinction matters because the fixes are opposite:
-
-| | What happened | Fix |
-|---|---|---|
-| **Drift** | The world changed. The model was right and reality moved. | Retrain |
-| **Skew** | The two pipelines disagree. Training computes age in years, serving in months. | Retraining will not help |
-
-Skew is more common and far harder to see, because **every component passes its own
-tests**. It only appears when the pipelines are compared directly.
-
-```python
-detect_skew(training_rows, serving_rows)
-# {"kind": "unit", "detail": "serving is 12x training - looks like years vs months",
-#  "severity": "critical"}
-```
-
-Detected: missing/extra features, type changes, **unit mismatches by name**,
-missingness gaps (usually a join that silently became an inner join), and values
-outside the training range.
-
-`safe_to_serve` is a **blocking verdict, not a dashboard tile**. Skew is not something
-to watch trend upward — it means the pipelines disagree today.
-
-## 3. Model cards, where the useful half is "out of scope"
-
-```python
-ModelCard.REQUIRED = ("intended_use", "out_of_scope", "training_data",
-                      "owner", "limitations")
-```
-
-`out_of_scope` is the section that stops a claims-triage model being quietly
-repurposed for pricing. An incomplete card is not a documentation debt — it blocks
-release.
-
-`to_markdown()` prints `UNASSIGNED` for a missing owner rather than omitting the line,
-because an absent field reads as an oversight and an explicit `UNASSIGNED` reads as a
-finding.
-
-## 4. Consent and purpose limitation, enforced at read time
-
-Pakistan's PDPA, like GDPR, ties personal data to the purpose it was collected for. A
-dataset gathered for claims processing is **not** available for marketing because it
-happens to live in the same warehouse.
-
-```python
-ledger.permitted(cohort, "claims")     # ["s1", "s2"]
-ledger.permitted(cohort, "marketing")  # []
-```
-
-Two decisions worth stating:
-
-- **Absence of a record is absence of consent.** Defaulting the other way is exactly
-  how a marketing model ends up trained on claims data.
-- **Withdrawal is not retroactive for a past query.** A model trained lawfully in March
-  was lawful in March. Retroactive invalidation is a *different* obligation from
-  deletion, and conflating them makes both harder to reason about.
-
-Retention is a first-class operation, not a script someone remembers to run — and a
-purged value stays purged, rather than silently falling back to an older record that
-has been legally deleted.
-
-## The release gate refuses
-
-```python
-ReleaseGate().evaluate(card=card, metrics=metrics, fairness=fairness, skew=skew)
-# {"approved": False,
-#  "failures": ["model card has not been reviewed",
-#               "brier 0.400 above maximum 0.25",
-#               "2 critical training/serving skew findings"],
-#  "gate": "insurance-mlops/release/v1"}
-```
-
-Four properties of that design:
-
-- **It refuses, it does not warn.** A gate that emits a warning is a gate that gets
-  merged past on a Friday.
-- **Calibration is checked separately from ranking.** A model can rank perfectly and be
-  badly wrong about the level — and an insurer *prices* from the level.
-- **A missing metric blocks.** Absent evidence is not evidence of adequacy.
-- **Every failure is listed, not just the first.** One fix per deploy attempt is how a
-  release takes a fortnight.
-
-The gate is named in its own output, so the decision is attributable in an audit rather
-than anonymous.
-
-## Tests
-
-**118 tests. No dependencies, no data, no cloud.**
-
-Point-in-time correctness is exact — a value either was knowable at a moment or it was
-not — so leakage is *asserted*, not sampled for.
-
-| Covered | |
+| | |
 |---|---|
-| Point-in-time | later values invisible, latest-knowable wins, reporting lag, impossible availability refused, out-of-order backfills, decision-time training sets, staleness |
-| Retention | purge before cutoff, series removal, purged values stay purged |
-| Skew | unit mismatch named (incl. noisy independent years-vs-months samples), unchanged noisy features stay safe, missing/extra feature, missingness gap, type change, out-of-range, clean pipelines, blocking verdict |
-| Model cards | completeness, every required field, `UNASSIGNED` owner, metrics rendered |
-| Consent | purpose limitation, no-record default, withdrawal, non-retroactivity, pre-grant queries |
-| Release gate | approval, each failure mode, missing metric, all failures listed, named gate |
-| CLI | JSONL/JSON/CSV parsed equal, missing-cell forms, exit codes, `--json` output |
+| Release candidates in the demo | 5: 1 approved, 4 refused, each refusal naming its condition |
+| Skew caught on v4.4.0 | unit mismatch (12x) and 91.7% of serving values outside the training range 1 to 12 |
+| Gate thresholds (defaults) | Gini >= 0.3, Brier <= 0.25, disparate impact >= 0.80, card complete and reviewed, skew safe |
+| Tests | 118, under two seconds; leakage is asserted exactly, not sampled for |
 
-## Where this sits
+## Tech stack
 
-Deliberately does **not** re-implement what the neighbouring repos already do:
+- Python 3.10+, standard library only; in-memory store
+- `argparse` CLI (`insurance-mlops`, or `python -m insurance`), JSON / JSON Lines / CSV input
+- pytest and ruff for development, hatchling for the build; `uv sync` works too
 
-- Serving, canary and rollback → [`model-serving-platform`](https://github.com/hammasbuilds/model-serving-platform)
-- Drift monitoring → [`llm-observability-platform`](https://github.com/hammasbuilds/llm-observability-platform)
-- Scorecards, calibration, fairness metrics → [`credit-risk-engine`](https://github.com/hammasbuilds/credit-risk-engine)
-
-This one owns the parts of the lifecycle those do not: **what the model was trained on,
-whether it is still the same pipeline, and whether it is allowed to ship.**
-
-## Limits
-
-- In-memory. A production feature store is Postgres or a columnar file; the as-of query
-  and its correctness argument do not change.
-- Skew detection compares batches. Per-request skew needs the serving path to log its
-  computed features, which is the harder organisational problem rather than the harder
-  technical one.
-- The consent ledger models purpose and withdrawal, not lawful basis, data subject
-  access or cross-border transfer. Those are real PDPA obligations and they are not
-  here.
-- No training code. Fitting is the easy part; this repo is the parts around it that
-  decide whether the fit was valid.
-
-## Keywords
-
-MLOps &middot; insurance &middot; point-in-time correctness &middot; feature store &middot; data leakage &middot; training serving skew &middot; model cards &middot; model governance &middot; responsible AI &middot; GDPR &middot; consent management &middot; purpose limitation &middot; release gate &middot; regulated ML
-
-## License
-
-MIT
-
----
-
-## Run it yourself
+## Run it
 
 ```bash
 git clone https://github.com/hammasbuilds/insurance-mlops
 cd insurance-mlops
-
-pip install -e ".[dev]"  # zero runtime dependencies; pytest for development
-pytest -q                # 118 tests, under two seconds
+pip install -e ".[dev]"  # zero runtime dependencies; pytest and ruff for development
+python demo.py
+pytest -q                # 118 tests
 ```
 
-Every call below is real and runs as shown — paste the whole block into a `python` shell:
+Every call below runs as shown; paste the block into a `python` shell:
 
 ```python
 from insurance import ConsentLedger, FeatureStore, ModelCard, ReleaseGate, detect_skew
@@ -256,7 +123,7 @@ ReleaseGate().evaluate(
 )["approved"]                                                   # False - card.owner is blank
 ```
 
-### On files, for CI and on-call
+On files, for CI and on-call:
 
 ```bash
 insurance-mlops skew training.jsonl serving.jsonl [--json]   # or: python -m insurance ...
@@ -264,43 +131,8 @@ insurance-mlops gate --card card.json --metrics metrics.json \
     --fairness fairness.json --skew skew.json [--json]
 ```
 
-Exit code 0 for safe/approved, 1 for refused, 2 for bad input — wire either straight
-into a CI gate. Rows are JSON Lines, a JSON array, or CSV; a CSV cell and the same value
-in a JSONL export compare equal, including blank/NA/NaN/null as missing.
+A CSV cell and the same value in a JSONL export compare equal, including blank/NA/NaN/null as missing.
 
-### Input / Output
+## Licence
 
-```console
-$ python demo.py
-INPUT
-   v4.2.0  documented, reviewed, calibrated
-   v4.3.0  no owner recorded
-   v4.4.0  units changed between train and serve
-   v4.5.0  barely separates, and unevenly
-   v4.6.0  eval job crashed and wrote NaN
-
-OUTPUT
-   v4.2.0  documented, reviewed, calibrated        APPROVED
-   v4.3.0  no owner recorded                       REFUSED
-      - model card incomplete: owner
-   v4.4.0  units changed between train and serve   REFUSED
-      - training/serving skew in vehicle_age (unit): serving divided by 12 matches training - looks like years vs months
-      - training/serving skew in vehicle_age (range): 91.7% of serving values fall outside the training range 1 to 12
-   v4.5.0  barely separates, and unevenly          REFUSED
-      - gini 0.080 below minimum 0.3
-      - brier 0.310 above maximum 0.25
-      - disparate impact 0.610 below 0.80
-   v4.6.0  eval job crashed and wrote NaN          REFUSED
-      - gini is NaN - the evaluation did not produce a value
-      - brier is NaN - the evaluation did not produce a value
-      - worst_disparate_impact not supplied
-
-   The gate refuses. It does not warn and proceed, because a warning
-   on a release pipeline is a release.
-```
-
-Each refusal names the specific condition that failed, which is the only form of refusal
-anyone can act on. v4.4.0 is the interesting one: the model is unchanged and its metrics
-are identical to the approved v4.2.0. What failed is that `vehicle_age` arrives in months
-at serving time and was trained in years — a fault no evaluation metric can see, because
-the evaluation set has the training units.
+MIT
